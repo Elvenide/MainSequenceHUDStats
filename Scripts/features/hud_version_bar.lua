@@ -278,42 +278,55 @@ local function DiscoverPlaytimeSource(worldSub, dmsWorld, gameState)
         end
     end
 
-    -- 3. Dynamic reflection scan on DMSWorld for any *Time* / *Tick* / *Play* numeric property
+    -- 3. Dynamic reflection scan across DMSWorld, DMSWorldSubsystem, GameInstance, GameState, PlayerObject, and SaveGame
+    local pc = Core.GetLocalPlayerController()
+    local gi, po, sg = nil, nil, nil
+    pcall(function() if Core.IsValidObj(pc) and pc.GetGameInstance then gi = pc:GetGameInstance() end end)
+    pcall(function() if Core.IsValidObj(worldSub) and worldSub.GetLocalPlayerObject then po = worldSub:GetLocalPlayerObject() end end)
+    pcall(function() sg = FindFirstOf("SaveGame") end)
+
+    local scanObjects = {
+        { tag = "world", obj = dmsWorld },
+        { tag = "sub",   obj = worldSub },
+        { tag = "gi",    obj = gi },
+        { tag = "gs",    obj = gameState },
+        { tag = "po",    obj = po },
+        { tag = "save",  obj = sg },
+    }
     local discoveredNames = {}
-    if Core.IsValidObj(dmsWorld) then
-        pcall(function()
-            local cls = dmsWorld:GetClass()
-            if Core.IsValidObj(cls) and cls.ForEachProperty then
-                cls:ForEachProperty(function(prop)
-                    local pn = nil
-                    pcall(function() pn = prop:GetFName():ToString() end)
-                    if type(pn) == "string" then
-                        local low = pn:lower()
-                        if low:find("time", 1, true) or low:find("tick", 1, true) or low:find("play", 1, true) then
-                            discoveredNames[#discoveredNames + 1] = pn
+    for _, t in ipairs(scanObjects) do
+        if Core.IsValidObj(t.obj) then
+            pcall(function()
+                local cls = t.obj:GetClass()
+                if Core.IsValidObj(cls) and cls.ForEachProperty then
+                    cls:ForEachProperty(function(prop)
+                        local pn = nil
+                        pcall(function() pn = prop:GetFName():ToString() end)
+                        if type(pn) == "string" then
+                            local low = pn:lower()
+                            if low:find("time", 1, true) or low:find("tick", 1, true) or low:find("play", 1, true) or low:find("durat", 1, true) then
+                                local okV, v = pcall(function() return t.obj[pn] end)
+                                local num = okV and ReadNumericValue(v) or nil
+                                if num ~= nil then
+                                    discoveredNames[#discoveredNames + 1] = string.format("%s.%s=%.1f", t.tag, pn, num)
+                                    if not PlaytimeSource and (low:find("playtime", 1, true) or low:find("timeplayed", 1, true) or low:find("totaltime", 1, true) or low:find("worldtime", 1, true) or low:find("simtime", 1, true)) then
+                                        PlaytimeSource = { kind = "prop", owner = t.tag, name = pn, objRef = t.obj }
+                                        Core.Log(string.format("[HudStats] Discovered total save playtime property %s.%s (%.1fs)", t.tag, pn, num))
+                                    end
+                                end
+                            end
                         end
-                    end
-                end)
-            end
-        end)
-        for _, pn in ipairs(discoveredNames) do
-            local low = pn:lower()
-            if low:find("playtime", 1, true) or low:find("timeplayed", 1, true) or low:find("totaltime", 1, true) or low:find("elapsed", 1, true) then
-                local ok, v = pcall(function() return dmsWorld[pn] end)
-                local num = ok and ReadNumericValue(v) or nil
-                if num and num >= 0 then
-                    PlaytimeSource = { kind = "prop", owner = "world", name = pn }
-                    Core.Log(string.format("[HudStats] Discovered total save playtime property world.%s (%.1fs)", pn, num))
-                    return
+                    end)
                 end
-            end
+            end)
         end
     end
+    if PlaytimeSource then return end
 
     -- 4. Fallback: session elapsed time since loading into the save
     PlaytimeSource = { kind = "session" }
     if #discoveredNames > 0 then
-        Core.Log("[HudStats] No total save playtime property matched (DMSWorld candidates: " .. table.concat(discoveredNames, ", ") .. "); using session playtime.")
+        Core.Log("[HudStats] Candidates: " .. table.concat(discoveredNames, ", ") .. " (using session playtime).")
     else
         Core.Log("[HudStats] Using session playtime (no exposed save playtime property found).")
     end
@@ -344,7 +357,7 @@ local function SamplePlaytimeSeconds()
     end
     local src = PlaytimeSource
     if src and src.kind ~= "session" then
-        local target = (src.owner == "world") and dmsWorld or worldSub
+        local target = src.objRef or ((src.owner == "world") and dmsWorld or worldSub)
         if Core.IsValidObj(target) then
             local ok, v = pcall(function()
                 if src.kind == "prop" or src.kind == "tick_prop" then
