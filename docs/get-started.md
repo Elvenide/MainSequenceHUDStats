@@ -43,15 +43,15 @@ Choose either **MSCoreManager** (recommended) or **Manual UE4SS Installation** b
      ```
 2. **Install Elvenide's HUD Stats**:
    - Download **$(System.Collections.Hashtable.ZipBase)-v<version>.zip** from [github.com/Elvenide/MainSequenceHUDStats/releases](https://github.com/Elvenide/MainSequenceHUDStats/releases).
-   - Open the zip, navigate into its `Mods\` folder, and copy the `MainSequenceHUDStats` folder into:
+   - Open the zip, navigate into its `Mods\` folder, and copy the `ElvenidesHUDStats` folder into:
      ```
-     Main Sequence\Windows\MainSequence\Binaries\Win64\ue4ss\Mods\MainSequenceHUDStats\
+     Main Sequence\Windows\MainSequence\Binaries\Win64\ue4ss\Mods\ElvenidesHUDStats\
      ```
-     *(You can safely leave `mscore.mod` inside `MainSequenceHUDStats\`—UE4SS ignores it.)*
-   - Ensure `MainSequenceHUDStats\enabled.txt` exists (an empty file is fine).
-   - Open `ue4ss\Mods\mods.txt` and add `MainSequenceHUDStats : 1` **above** `Keybinds : 1`:
+     *(You can safely leave `mscore.mod` inside `ElvenidesHUDStats\`—UE4SS ignores it.)*
+   - Ensure `ElvenidesHUDStats\enabled.txt` exists (an empty file is fine).
+   - Open `ue4ss\Mods\mods.txt` and add `ElvenidesHUDStats : 1` **above** `Keybinds : 1`:
      ```ini
-     MainSequenceHUDStats : 1
+     ElvenidesHUDStats : 1
 
      ; Built-in keybinds, do not move up!
      Keybinds : 1
@@ -61,5 +61,5 @@ Choose either **MSCoreManager** (recommended) or **Manual UE4SS Installation** b
 
 ## Uninstalling
 
-- Remove or rename `MainSequenceHUDStats\enabled.txt` (or delete the `MainSequenceHUDStats` folder and remove `MainSequenceHUDStats : 1` from `mods.txt`).
+- Remove or rename `ElvenidesHUDStats\enabled.txt` (or delete the `ElvenidesHUDStats` folder and remove `ElvenidesHUDStats : 1` from `mods.txt`).
 - Your saves remain completely intact with no missing-mod dependencies.
