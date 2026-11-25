@@ -40,6 +40,8 @@ local function NormalizeSaveKey(name)
     return s
 end
 
+local SAVE_PLAYTIME_TICK_HZ = 30.0 -- Verified: Main Sequence stores SaveGame.Playtime in 30 Hz simulation ticks
+
 local function SnapshotSaveGamePlaytimes()
     local okAll, sgList = pcall(FindAllOf, "SaveGame")
     if not okAll or not sgList then return end
@@ -50,8 +52,8 @@ local function SnapshotSaveGamePlaytimes()
             local ptNum = nil
             pcall(function()
                 local v = sg.Playtime or sg.PlayTime or sg.TotalPlayTime
-                if type(v) == "number" then ptNum = v
-                elseif type(v) == "userdata" then ptNum = Core.GetFPFloat(v) end
+                if type(v) == "number" then ptNum = v / SAVE_PLAYTIME_TICK_HZ
+                elseif type(v) == "userdata" then ptNum = Core.GetFPFloat(v) / SAVE_PLAYTIME_TICK_HZ end
             end)
             if ptNum and ptNum >= 0 then
                 local candidateNames = {}
