@@ -23,6 +23,82 @@ local PlaytimeSource = nil -- { kind = "prop"|"fn"|"tick_prop"|"tick_fn"|"save_s
 local PlaytimeDiscovered = false
 local PlaytimeBaseSeconds = 0.0
 local PlaytimeBaseClock = nil
+local CurrentLoadedSaveName = nil
+local IsInActiveSave = false
+local CachedSavePlaytimes = {} -- normalizedSaveKey -> seconds
+
+local function SafeStr(val)
+    if type(val) == "string" then return val end
+    if val == nil then return "" end
+    local ok, s = pcall(function() return val:ToString() end)
+    return (ok and type(s) == "string") and s or ""
+end
+
+local function NormalizeSaveKey(name)
+    if type(name) ~= "string" then return "" end
+    local s = name:lower():gsub("_s$", ""):gsub("[^a-z0-9]", "")
+    return s
+end
+
+local function SnapshotSaveGamePlaytimes()
+    local okAll, sgList = pcall(FindAllOf, "SaveGame")
+    if not okAll or not sgList then return end
+    local loggedSample = false
+    for i = 1, #sgList do
+        local sg = sgList[i]
+        if Core.IsValidObj(sg) then
+            local ptNum = nil
+            pcall(function()
+                local v = sg.Playtime or sg.PlayTime or sg.TotalPlayTime
+                if type(v) == "number" then ptNum = v
+                elseif type(v) == "userdata" then ptNum = Core.GetFPFloat(v) end
+            end)
+            if ptNum and ptNum >= 0 then
+                local candidateNames = {}
+                pcall(function()
+                    for _, pn in ipairs({ "SaveName", "WorldName", "SlotName", "DisplayName", "Name", "FileName", "SaveSlotName" }) do
+                        local raw = sg[pn]
+                        local s = SafeStr(raw)
+                        if s ~= "" then candidateNames[#candidateNames + 1] = s end
+                    end
+                end)
+                -- Also inspect any string/FText/FName properties on the first SaveGame if none of the standard names matched
+                if #candidateNames == 0 then
+                    pcall(function()
+                        local cls = sg:GetClass()
+                        if Core.IsValidObj(cls) and cls.ForEachProperty then
+                            local propsLog = {}
+                            cls:ForEachProperty(function(prop)
+                                local pn = nil
+                                pcall(function() pn = prop:GetFName():ToString() end)
+                                if type(pn) == "string" then
+                                    local okV, v = pcall(function() return sg[pn] end)
+                                    local s = okV and SafeStr(v) or ""
+                                    if s ~= "" and #s <= 80 then
+                                        candidateNames[#candidateNames + 1] = s
+                                    end
+                                    if not loggedSample then
+                                        propsLog[#propsLog + 1] = pn
+                                    end
+                                end
+                            end)
+                            if not loggedSample and #propsLog > 0 then
+                                loggedSample = true
+                                Core.Log("[HudStats] SaveGame props: " .. table.concat(propsLog, ", "))
+                            end
+                        end
+                    end)
+                end
+                for _, cname in ipairs(candidateNames) do
+                    local key = NormalizeSaveKey(cname)
+                    if key ~= "" then
+                        CachedSavePlaytimes[key] = ptNum
+                    end
+                end
+            end
+        end
+    end
+end
 
 local function ExtractMSVersion(str)
     if type(str) ~= "string" then return nil, nil end
@@ -280,147 +356,76 @@ local function DiscoverPlaytimeSource(worldSub, dmsWorld, gameState)
         end
     end
 
-    -- 3. Resolve the ACTIVE loaded save's Playtime (never blindly use FindFirstOf("SaveGame"), which can pick
-    --    an unrelated save from the Load Game menu list!).
-    local pc = Core.GetLocalPlayerController()
-    local gi, po = nil, nil
-    pcall(function() if Core.IsValidObj(pc) and pc.GetGameInstance then gi = pc:GetGameInstance() end end)
-    pcall(function() if Core.IsValidObj(worldSub) and worldSub.GetLocalPlayerObject then po = worldSub:GetLocalPlayerObject() end end)
-
-    -- 3a. Look for an active SaveGame/SaveData object referenced directly by worldSub, dmsWorld, or GameInstance
-    local activeSaveObj = nil
-    local activeSaveSource = nil
-    local savePropCandidates = {}
-    for _, holder in ipairs({
-        { tag = "sub",   obj = worldSub },
-        { tag = "world", obj = dmsWorld },
-        { tag = "gi",    obj = gi },
-        { tag = "gs",    obj = gameState },
-    }) do
-        if Core.IsValidObj(holder.obj) then
-            pcall(function()
-                local cls = holder.obj:GetClass()
-                if Core.IsValidObj(cls) and cls.ForEachProperty then
-                    cls:ForEachProperty(function(prop)
-                        local pn = nil
-                        pcall(function() pn = prop:GetFName():ToString() end)
-                        if type(pn) == "string" then
-                            local low = pn:lower()
-                            if low:find("save", 1, true) or low:find("playtime", 1, true) or low:find("worldtime", 1, true) or low:find("simtime", 1, true) then
-                                savePropCandidates[#savePropCandidates + 1] = holder.tag .. "." .. pn
-                                local okV, v = pcall(function() return holder.obj[pn] end)
-                                if okV and Core.IsValidObj(v) and not activeSaveObj then
-                                    local okPt, ptVal = pcall(function() return v.Playtime or v.PlayTime or v.TotalPlayTime end)
-                                    local ptNum = okPt and ReadNumericValue(ptVal) or nil
-                                    if ptNum and ptNum >= 0 then
-                                        activeSaveObj = v
-                                        activeSaveSource = holder.tag .. "." .. pn
-                                    end
-                                end
-                            end
-                        end
-                    end)
-                end
-            end)
-        end
-    end
-
-    -- 3b. If no direct SaveGame property was found, match the active save name against FindAllOf("SaveGame")
-    local activeSaveName = nil
-    for _, holder in ipairs({ worldSub, dmsWorld, gi, gameState }) do
-        if Core.IsValidObj(holder) and not activeSaveName then
-            for _, fn in ipairs({ "GetSaveName", "GetCurrentSaveName", "GetWorldName", "GetSaveSlotName" }) do
-                if type(holder[fn]) == "function" then
-                    local okN, n = pcall(function() return holder[fn](holder) end)
-                    if okN and n ~= nil then
-                        local s = (type(n) == "string") and n or (pcall(function() return n:ToString() end) and n:ToString() or nil)
-                        if type(s) == "string" and s ~= "" then activeSaveName = s break end
-                    end
-                end
-            end
-            if not activeSaveName then
-                for _, pn in ipairs({ "SaveName", "CurrentSaveName", "WorldName", "SaveSlotName", "CurrentSlotName" }) do
-                    local okN, n = pcall(function() return holder[pn] end)
-                    if okN and n ~= nil then
-                        local s = (type(n) == "string") and n or (pcall(function() return n:ToString() end) and n:ToString() or nil)
-                        if type(s) == "string" and s ~= "" then activeSaveName = s break end
-                    end
-                end
-            end
-        end
-    end
-
-    if not Core.IsValidObj(activeSaveObj) then
-        local okAll, sgList = pcall(FindAllOf, "SaveGame")
-        if okAll and sgList and #sgList > 0 then
-            -- Prefer exact match to activeSaveName; otherwise pick the most recently allocated live SaveGame
-            local matched = nil
-            local lastValid = nil
-            for i = 1, #sgList do
-                local sg = sgList[i]
-                if Core.IsValidObj(sg) then
-                    local okPt, ptVal = pcall(function() return sg.Playtime or sg.PlayTime or sg.TotalPlayTime end)
-                    local ptNum = okPt and ReadNumericValue(ptVal) or nil
-                    if ptNum and ptNum >= 0 then
-                        lastValid = sg
-                        if activeSaveName then
-                            local okSn, sn = pcall(function()
-                                local raw = sg.SaveName or sg.SlotName or sg.WorldName or sg.Name
-                                if type(raw) == "string" then return raw end
-                                if raw and raw.ToString then return raw:ToString() end
-                                return nil
-                            end)
-                            if okSn and type(sn) == "string" and sn:lower() == activeSaveName:lower() then
-                                matched = sg
-                                activeSaveSource = "SaveGame[match:" .. sn .. "]"
-                            end
-                        end
-                    end
-                end
-            end
-            if Core.IsValidObj(matched) then
-                activeSaveObj = matched
-            elseif Core.IsValidObj(lastValid) then
-                activeSaveObj = lastValid
-                activeSaveSource = "SaveGame[latest#" .. tostring(#sgList) .. "]"
-            end
-        end
-    end
-
-    if Core.IsValidObj(activeSaveObj) then
-        local ptProp = nil
-        local ptNum = nil
-        for _, pn in ipairs({ "Playtime", "PlayTime", "TotalPlayTime" }) do
-            local okV, v = pcall(function() return activeSaveObj[pn] end)
-            local n = okV and ReadNumericValue(v) or nil
-            if n and n >= 0 then
-                ptProp = pn
-                ptNum = n
-                break
-            end
-        end
-        if ptProp and ptNum then
-            PlaytimeBaseSeconds = ptNum
+    -- 3. Resolve total save playtime:
+    -- 3a. Check cached SaveGame.Playtime snapshotted from LoadExistingGame(SaveName)
+    if CurrentLoadedSaveName and CurrentLoadedSaveName ~= "" then
+        SnapshotSaveGamePlaytimes()
+        local key = NormalizeSaveKey(CurrentLoadedSaveName)
+        local cachedPt = (key ~= "") and CachedSavePlaytimes[key] or nil
+        if cachedPt and cachedPt >= 0 then
+            PlaytimeBaseSeconds = cachedPt
             PlaytimeBaseClock = os.clock()
-            PlaytimeSource = {
-                kind = "save_snapshot",
-                objRef = activeSaveObj,
-                name = ptProp,
-                lastRaw = ptNum,
-            }
-            Core.Log(string.format("[HudStats] Bound save playtime to %s.%s (%.1fs, activeSave=%s)",
-                tostring(activeSaveSource), ptProp, ptNum, tostring(activeSaveName)))
+            PlaytimeSource = { kind = "save_snapshot", objRef = nil, name = "Playtime", lastRaw = cachedPt }
+            Core.Log(string.format("[HudStats] Bound total save playtime for '%s': %.1fs (%s)",
+                CurrentLoadedSaveName, cachedPt, FormatPlaytime(cachedPt) or "?"))
             return
         end
     end
 
+    -- 3b. Check world.SaveableRoot / gs.BlueprintSaveGame / gs numeric properties for a live playtime counter
+    local extraTargets = {}
+    pcall(function()
+        if Core.IsValidObj(dmsWorld) and Core.IsValidObj(dmsWorld.SaveableRoot) then
+            extraTargets[#extraTargets + 1] = { tag = "saveRoot", obj = dmsWorld.SaveableRoot }
+        end
+    end)
+    pcall(function()
+        if Core.IsValidObj(gameState) and Core.IsValidObj(gameState.BlueprintSaveGame) then
+            extraTargets[#extraTargets + 1] = { tag = "bpSave", obj = gameState.BlueprintSaveGame }
+        end
+    end)
+    if Core.IsValidObj(gameState) then
+        extraTargets[#extraTargets + 1] = { tag = "gs", obj = gameState }
+    end
+
+    local diagCandidates = {}
+    for _, holder in ipairs(extraTargets) do
+        pcall(function()
+            local cls = holder.obj:GetClass()
+            if Core.IsValidObj(cls) and cls.ForEachProperty then
+                cls:ForEachProperty(function(prop)
+                    local pn = nil
+                    pcall(function() pn = prop:GetFName():ToString() end)
+                    if type(pn) == "string" then
+                        local low = pn:lower()
+                        if low:find("play", 1, true) or low:find("time", 1, true) or low:find("tick", 1, true) then
+                            local okV, v = pcall(function() return holder.obj[pn] end)
+                            local num = okV and ReadNumericValue(v) or nil
+                            if num ~= nil then
+                                diagCandidates[#diagCandidates + 1] = string.format("%s.%s=%.1f", holder.tag, pn, num)
+                                if not PlaytimeSource and (low:find("playtime", 1, true) or low:find("timeplayed", 1, true) or low:find("totaltime", 1, true)) then
+                                    PlaytimeBaseSeconds = num
+                                    PlaytimeBaseClock = os.clock()
+                                    PlaytimeSource = { kind = "save_snapshot", objRef = holder.obj, name = pn, lastRaw = num }
+                                    Core.Log(string.format("[HudStats] Bound live save playtime to %s.%s (%.1fs)", holder.tag, pn, num))
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+        end)
+    end
+    if PlaytimeSource then return end
+
     -- 4. Fallback: session elapsed time since loading into the save
     PlaytimeSource = { kind = "session" }
-    if #savePropCandidates > 0 then
-        Core.Log("[HudStats] Save/time candidates: " .. table.concat(savePropCandidates, ", ") .. " (using session playtime).")
-    else
-        Core.Log("[HudStats] Using session playtime (no exposed save playtime property found).")
+    local cachedKeys = {}
+    for k, v in pairs(CachedSavePlaytimes) do
+        cachedKeys[#cachedKeys + 1] = string.format("%s=%.0f", k, v)
     end
+    Core.Log(string.format("[HudStats] Fallback to session playtime (loadedSave='%s', cachedSaves=[%s], diag=[%s])",
+        tostring(CurrentLoadedSaveName), table.concat(cachedKeys, ", "), table.concat(diagCandidates, ", ")))
 end
 
 local function SamplePlaytimeSeconds()
@@ -431,12 +436,8 @@ local function SamplePlaytimeSeconds()
     if Core.IsValidObj(worldSub) and worldSub.GetDMSWorld then
         pcall(function() dmsWorld = worldSub:GetDMSWorld() end)
     end
-    -- Check if we are actually in a live playable world (not Main Menu!)
-    local isInGame = false
-    pcall(function()
-        if Core.IsValidObj(pc.Pawn) then isInGame = true end
-    end)
-    if not isInGame or not Core.IsValidObj(dmsWorld) then
+    -- Only show Playtime when actually in a loaded save (never on the Main Menu!)
+    if not IsInActiveSave or not Core.IsValidObj(dmsWorld) then
         return nil
     end
     if not SessionStartClock then
@@ -581,8 +582,15 @@ local function ScheduleHintScan(w)
 end
 
 Feature.WatchWidgets = {
-    WBP_CharacterHUD_C = ScheduleHintScan,
-    WBP_MainMenu_C     = ScheduleHintScan,
+    WBP_CharacterHUD_C = function(w)
+        IsInActiveSave = true
+        ScheduleHintScan(w)
+    end,
+    WBP_MainMenu_C = function(w)
+        IsInActiveSave = false
+        ScheduleHintScan(w)
+        ExecuteInGameThreadWithDelay(600, SnapshotSaveGamePlaytimes)
+    end,
 }
 
 function Feature.OnToggle(enabled)
@@ -596,6 +604,40 @@ function Feature.OnToggle(enabled)
     end
 end
 
+function Feature.RegisterHooks()
+    Core.TryRegisterHook(
+        "HudStats_LoadExistingGame",
+        "/Script/MainSequence.DMSWorldSubsystem:LoadExistingGame",
+        function(_, SaveNameParam)
+            local saveName = SafeStr(Core.UnwrapStruct(SaveNameParam))
+            ExecuteInGameThread(function()
+                -- Snapshot SaveGame.Playtime from the Main Menu's loaded save metadata BEFORE map transition GCs them!
+                SnapshotSaveGamePlaytimes()
+                CurrentLoadedSaveName = (saveName ~= "") and saveName or CurrentLoadedSaveName
+                IsInActiveSave = true
+                SessionStartClock = os.clock()
+                PlaytimeSource = nil
+                PlaytimeDiscovered = false
+            end)
+        end
+    )
+    Core.TryRegisterHook(
+        "HudStats_StartNewGame",
+        "/Script/MainSequence.DMSWorldSubsystem:StartNewGame",
+        function()
+            ExecuteInGameThread(function()
+                CurrentLoadedSaveName = nil
+                IsInActiveSave = true
+                PlaytimeBaseSeconds = 0.0
+                PlaytimeBaseClock = os.clock()
+                SessionStartClock = os.clock()
+                PlaytimeSource = { kind = "session" }
+                PlaytimeDiscovered = true
+            end)
+        end
+    )
+end
+
 function Feature.Init()
     if Core.IsFeatureEnabled("HudVersionBar") then
         StartLoop()
@@ -605,7 +647,6 @@ end
 function Feature.OnMapLoad()
     TargetTextBlock = nil
     LastScanTime = -999.0
-    SessionStartClock = nil
     PlaytimeSource = nil
     PlaytimeDiscovered = false
     if Core.IsFeatureEnabled("HudVersionBar") then StartLoop() end
@@ -614,7 +655,7 @@ end
 function Feature.OnClientRestart()
     TargetTextBlock = nil
     LastScanTime = -999.0
-    SessionStartClock = os.clock()
+    if not SessionStartClock then SessionStartClock = os.clock() end
     PlaytimeSource = nil
     PlaytimeDiscovered = false
     if Core.IsFeatureEnabled("HudVersionBar") then StartLoop() end
