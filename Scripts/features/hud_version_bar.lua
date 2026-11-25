@@ -276,8 +276,49 @@ local function ReadNumericValue(val)
     return nil
 end
 
+local function ReadPlaytimeFromMetaSlot(saveName)
+    if type(saveName) ~= "string" or saveName == "" then return nil end
+    if not Core.IsValidObj(CachedGameplayStaticsCDO) then
+        CachedGameplayStaticsCDO = Core.GetCDO("/Script/Engine.Default__GameplayStatics")
+    end
+    if not Core.IsValidObj(CachedGameplayStaticsCDO) or not CachedGameplayStaticsCDO.LoadGameFromSlot then
+        return nil
+    end
+    -- Main Sequence stores lightweight save metadata in "<SaveBase>_M.sav" alongside "<SaveBase>_S.sav"
+    local baseName = saveName:gsub("_[sSmM]$", "")
+    local metaSlot = baseName .. "_M"
+    local okLoad, metaSave = pcall(function()
+        return CachedGameplayStaticsCDO:LoadGameFromSlot(metaSlot, 0)
+    end)
+    if okLoad and Core.IsValidObj(metaSave) then
+        local okPt, rawPt = pcall(function()
+            return metaSave.Playtime or metaSave.PlayTime or metaSave.TotalPlayTime
+        end)
+        local num = okPt and ReadNumericValue(rawPt) or nil
+        if num and num >= 0 then
+            return num / SAVE_PLAYTIME_TICK_HZ, metaSlot
+        end
+    end
+    return nil
+end
+
 local function DiscoverPlaytimeSource(worldSub, dmsWorld, gameState)
     PlaytimeDiscovered = true
+
+    -- 1. Direct read of the active save's lightweight metadata slot ("<SaveName>_M.sav") via native LoadGameFromSlot
+    --    Works reliably whether the player clicked Continue, Load Game, or loaded an Autosave!
+    if CurrentLoadedSaveName and CurrentLoadedSaveName ~= "" then
+        local metaSecs, metaSlot = ReadPlaytimeFromMetaSlot(CurrentLoadedSaveName)
+        if metaSecs and metaSecs >= 0 then
+            PlaytimeBaseSeconds = metaSecs
+            PlaytimeBaseClock = os.clock()
+            PlaytimeSource = { kind = "save_snapshot", objRef = nil, name = "Playtime", lastRaw = metaSecs }
+            Core.Log(string.format("[HudStats] Bound total save playtime from slot '%s': %.1fs (%s)",
+                tostring(metaSlot), metaSecs, FormatPlaytime(metaSecs) or "?"))
+            return
+        end
+    end
+
     local directTimeProps = {
         "TotalPlayTime", "PlayTime", "Playtime", "TimePlayed", "SavePlayTime",
         "TotalTimePlayed", "ElapsedPlayTime", "GameTime", "WorldTime", "SimTime",
